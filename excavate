@@ -1,0 +1,696 @@
+--rednet.open("right")
+--local x,y,z = gps.locate(1,false)
+--print("@ " .. tostring(x) .. "/" .. tostring(y) .. "/" .. tostring(z))
+
+--[[
+	Build Frame Quarry
+]]
+--[[
+	CONSTANTS
+]]
+BEDROCK_LEVEL = 5 --Level at which the bedrock is
+PERSISTANCE_FILE_PATH = "buildquarrypersist"
+STARTUP_SCRIPT_STRING = [[shell.run("%s", "resume")]]
+CHUNK_SIZE = 16
+
+	--[[
+	          z--
+			 N 2
+	          |
+	          |
+	x-- W 1 --+-- E 3  x++
+	          |
+	          |
+	         S 0
+			 z++
+	]]--
+TASKS = { --Different task descriptions
+    READY = "ready",
+    STANDING = "standing",
+    RETURNING = "returning",
+    MOVING = "excavate",
+    BUILD_FRAME = "build: frame",
+    BUILD_BLOCK_BREAKERS = "build: block breakers",
+    FINISHED = "finished",
+    EXCAVATE = "excavate",
+	MOVE_TO_EXCAVATE_START = "move to start",
+	MOVE_TO_DOCK = "move dock",
+	MOVE_TO_DOCK_RETURN = "move to dock return",
+	UNLOAD_AND_CHARGE = "unlock and charge"
+}
+
+STARTUP_SCRIPT_INSTALL_STATUS = {
+	NOT_INSTALLED = 1,
+	DIFFERENT = 2,
+	INSTALLED = 0
+}
+BLOCK_BREAKER_DIRECTION = dog.DIRS.EAST
+
+data = { --Just a table that I have created for convenience. It will be written to a file every move. Keeps track of many different variables.
+	currentlyDoing = TASKS.READY, --What task is currently being done
+    excavatex = 0,
+    excavatey = 0,
+    excavatez = 0,
+	excavateDirection = dog.DIRS.EAST,
+	moveToDockReturnCoords = {x = 0, y = 0, z = 0}, --Coords we go back to after going to the dock
+	moveToDockReturnTask = nil, --Task we go back to after going to the dock
+    current = 0,
+	movingDirection = dog.DIRS.EAST,
+	nextMovingDirection = nil,
+	tries = 0,
+	height = 30, --Height of quarry TODO
+	coords = {x = 0, y = 0, z = 0}, --We get our position by GPS
+	coordsDock = {x = 239, y = 15, z = 280}, --Dock world coordinates
+	
+	coordsExcavateStart = {x = 0, y = 0, z =0}, --Dock world coordinates
+	coordsExcavateEnd = {x = 0, y = 0, z =0}, --Dock world coordinates
+	
+	debug = 0,
+	debugMessage = ''
+}
+
+local configOptionsTable = {
+	{key = "Excavate X-Length", keyBlank = "Excavate X-Length (required!)", value = "32", varType = "number", transferName = "excavatex"},
+	{key = "Excavate Y-Length", keyBlank = "Excavate Y-Length (required!)", value = "32", varType = "number", transferName = "excavatey"},
+	{key = "Excavate Z-Length", keyBlank = "Excavate Z-Length (required!)", value = "32", varType = "number", transferName = "excavatez"}
+}
+
+function updateCoords() 
+	local pos = dog.getLocation()
+	data.coords.x = pos.x
+	data.coords.y = pos.y
+	data.coords.z = pos.z
+end
+
+function gotoPosition(position, action) 
+	while(not dog.coordsEquals(data.coords, position)) do
+		dog.goto(position.x, position.y, position.z, action)
+		updateCoords()
+	end
+end
+
+function stateMachine()
+	rednet.open("right")
+	-- main loop
+	while(true) do
+		updateCoords()
+		
+		if(data.currentlyDoing == TASKS.READY) then
+			data.coordsExcavateStart.x = data.coords.x - (data.coords.x % 16) + 16
+			data.coordsExcavateStart.y = data.coords.y - (data.coords.y % 16)
+			data.coordsExcavateStart.z = data.coords.z - (data.coords.z % 16)			
+			if(data.coordsExcavateStart.y == 0) then
+				data.coordsExcavateStart.y = 8
+			end			
+			data.coordsExcavateEnd.x = data.coordsExcavateStart.x + data.excavatex
+			data.coordsExcavateEnd.y = data.coordsExcavateStart.y + data.excavatey
+			data.coordsExcavateEnd.z = data.coordsExcavateStart.z + data.excavatez		
+			setStatus(TASKS.MOVE_TO_EXCAVATE_START)
+			
+		elseif(data.currentlyDoing == TASKS.STANDING) then
+			-- do nothing					
+			
+		elseif(data.currentlyDoing == TASKS.MOVE_TO_EXCAVATE_START) then
+			data.excavateDirection = nil
+			if(dog.coordsEquals(data.coords, data.coordsExcavateStart)) then
+				setStatus(TASKS.EXCAVATE)
+			else
+				gotoPosition(data.coordsExcavateStart, "dig")
+			end						
+			
+	--[[
+	          z--
+			 N 2
+	          |
+	          |
+	x-- W 1 --+-- E 3  x++
+	          |
+	          |
+	         S 0
+			 z++
+	]]--
+		elseif(data.currentlyDoing == TASKS.EXCAVATE) then
+			local coordsLevelExcatateStart = {x = data.coordsExcavateStart.x, y = data.coordsExcavateStart.y, z = data.coordsExcavateStart.z }
+			local coordsLevelExcatateEnd = {x = data.coordsExcavateEnd.x, y = data.coordsExcavateEnd.y, z = data.coordsExcavateEnd.z }
+			
+			local startx = coordsLevelExcatateStart.x
+			local starty = coordsLevelExcatateStart.y
+			
+			data.debugMessage = tostring(startx)
+			
+			print(data.coords.x)
+			print(data.coordsExcavateStart.x)
+			print(data.coordsExcavateEnd.x)
+			
+			if(data.coords.x >= data.coordsExcavateStart.x and data.coords.x <= data.coordsExcavateEnd.x) then
+				startx = data.coords.x
+			end
+			
+			if(data.coords.y >= data.coordsExcavateStart.y and data.coords.y <= data.coordsExcavateEnd.y) then
+				starty = data.coords.y
+			end
+			
+			local coordsInitial = {x = startx, y = starty, z = data.coordsExcavateStart.z }
+			
+			if(data.excavateDirection == dog.DIRS.WEST) then
+				coordsInitial.z = data.coordsExcavateEnd.z
+			end
+			
+			gotoPosition(coordsInitial, "dig")
+			
+			local target = {x = 0, y = data.coords.y, z = 0}
+			local moveOneCoords = {x = 0, y = data.coords.y, z = 0}
+			
+			local moveToDock = false
+			
+			-- excavate one y level
+			for ix = startx, coordsLevelExcatateEnd.x do
+				target.x = ix
+				
+				if(data.coords.z == coordsLevelExcatateStart.z) then
+					target.z = coordsLevelExcatateEnd.z
+				elseif(data.coords.z == coordsLevelExcatateEnd.z) then
+					target.z = coordsLevelExcatateStart.z
+				else
+					target.z = coordsLevelExcatateStart.z
+				end
+				
+				-- on all runs but the first move one "down" on the x axis before moving
+				if(ix ~= coordsLevelExcatateStart.x) then
+					moveOneCoords.x = data.coords.x + 1
+					moveOneCoords.z = data.coords.z
+					gotoPosition(moveOneCoords, "dig")
+				end
+				
+				gotoPosition(target, "dig")
+				
+				if(turtle.getFuelLevel() < 500 or isInventoryFull()) then
+					data.moveToDockReturnCoords = { x = data.coords.x, y = data.coords.y, z = data.coords.z }
+					data.moveToDockReturnTask = TASKS.EXCAVATE
+					setStatus(TASKS.MOVE_TO_DOCK)
+					moveToDock = true
+					break
+				end
+			end
+			
+			if(moveToDock == false) then
+				-- go up one y level
+				local moveOneUpCoords = {x = coordsLevelExcatateStart.x, y = data.coords.y + 1, z = data.coordsExcavateStart.z}
+				if(data.coords.y + 1 > coordsLevelExcatateEnd.y) then
+					setStatus(TASKS.RETURNING)			
+				end
+				gotoPosition(moveOneUpCoords, "dig")
+			end
+		elseif(data.currentlyDoing == TASKS.RETURNING) then
+			if(dog.coordsEquals(data.coords, data.coordsDock)) then
+				setStatus(TASKS.STANDING)
+			else
+				gotoPosition(data.coordsDock, "dig")
+			end			
+		elseif(data.currentlyDoing == TASKS.MOVE_TO_DOCK) then
+			if(dog.coordsEquals(data.coords, data.coordsDock)) then
+				setStatus(TASKS.UNLOAD_AND_CHARGE)
+			else
+				moveToDock()
+			end		
+		elseif(data.currentlyDoing == TASKS.UNLOAD_AND_CHARGE) then
+			unloadInventory()
+			if(turtle.getFuelLevel() > 10000) then
+				setStatus(TASKS.MOVE_TO_DOCK_RETURN)
+				
+				data.coordsDock.x = data.coordsDock.x  + 1
+				gotoPosition(data.coordsDock, "dig")
+				data.coordsDock.x = data.coordsDock.x  - 1
+			end
+		elseif(data.currentlyDoing == TASKS.MOVE_TO_DOCK_RETURN) then
+			if(dog.coordsEquals(data.coords, data.moveToDockReturnCoords)) then
+				setStatus(data.moveToDockReturnTask)
+			else
+				gotoPosition(data.moveToDockReturnCoords, "dig")
+			end			
+		elseif(data.currentlyDoing == TASKS.FINISHED) then
+			break
+		else 
+			print("UNKNOWN STATE: " .. data.currentlyDoing)
+		end		
+		
+		sleep(2)
+	end
+			
+	-- done
+	setStatus(TASKS.FINISHED)
+	fs.delete(PERSISTANCE_FILE_PATH)
+end
+
+-- ------------------------------------------------------------------
+
+function cleanup()
+	term.clear()
+	term.setCursorPos(1, 1)
+end
+--[[
+	Persistance
+]]
+function dumpToFile() --Dump the state to file
+	local file = io.open(PERSISTANCE_FILE_PATH, "w")
+	file:write(dog.SaveTable(data))
+	file:close()
+end
+
+function readFromFile() --Read the state from file
+	local file = io.open(PERSISTANCE_FILE_PATH, "r")
+	if file then
+		local tableStr = file:read("*a")
+		data = dog.LoadTable(tableStr)	
+		file:close()
+	end
+end
+
+function periodicSave()
+	while 1 do
+		dumpToFile()
+		sleep(0.5)
+	end
+end
+--[[
+	Mining methods
+]]
+function setStatus(status)
+	if(status == nil) then
+		error("status set to null?")
+	end
+	data.currentlyDoing = status
+	--data.debugMessage = ""
+end
+--[[
+	Check if the startup script is right
+]]
+function getStartupScriptStatus()
+	if not fs.exists("startup") then return STARTUP_SCRIPT_INSTALL_STATUS.NOT_INSTALLED end
+	local file = io.open("startup", "r")
+	if not file then return STARTUP_SCRIPT_INSTALL_STATUS.NOT_INSTALLED end
+	local str = file:read("*a")
+	file:close()
+	return str == string.format(STARTUP_SCRIPT_STRING, shell.getRunningProgram()) and STARTUP_SCRIPT_INSTALL_STATUS.INSTALLED or STARTUP_SCRIPT_INSTALL_STATUS.DIFFERENT
+end
+
+function installStartupScript()
+	fs.delete("startup")
+	local file = io.open("startup", "w")
+	file:write(string.format(STARTUP_SCRIPT_STRING, shell.getRunningProgram()))
+	file:close()
+end
+
+--[[
+	GUI
+]]
+
+function splitIntoLines(str)
+	local w, h = term.getSize()
+	local lines = {}
+	for line in str:gmatch("[^\r\n]+") do	
+		local currentLine = ""
+		for token in line:gmatch("[^%s]+") do
+			if #(currentLine .. token) > w-3 then
+				table.insert(lines, currentLine)
+				currentLine = token
+			else
+				currentLine = (currentLine~="" and currentLine .. " " or "") .. token
+			end
+		end
+		if currentLine~="" then table.insert(lines, currentLine) end
+	end
+	return lines
+end
+
+function showProgress(finished) --Progress
+	local progressBarSpinChars = {"/", "-", "\\", "|"}
+	local curChar = 0
+	local cur = 1
+	local w, h = term.getSize()
+	local exit = false
+	local running = true
+	local function cycleProgressBar()
+		curChar = (curChar + 1) % 4 --Cycle through the progress bar chars for an animation effect
+	end
+
+	local function clear()
+		term.clear()
+		cur = 0
+	end
+	
+	local function allocateLine()
+		cur = cur + 1
+	end
+
+	local function writeLine(desc, value)
+		if type(value) ~= "string" then value = tostring(value) end
+		allocateLine()
+		term.setCursorPos(1, cur)
+		term.write(desc .. (value~="" and ":" or ""))
+		term.setCursorPos(w - #value + 1, cur)
+		term.write(value)
+	end
+	
+	local function renderProgressBar(fraction)
+		allocateLine()
+		term.setCursorPos(1, cur)
+		local numOfDone = math.floor((w-3)*fraction)
+		local numOfLeft = math.ceil((w-3)*(1-fraction))
+		term.write("[")
+		if numOfDone>0 then term.write(string.rep("=", numOfDone)) end
+		term.write(fraction == 1 and "=" or progressBarSpinChars[curChar + 1])
+		if numOfLeft>0 then term.write(string.rep(" ", numOfLeft)) end
+		term.write("]")
+	end
+	
+	
+	-- PROGRESS
+	local function normalProgressRenderer()
+		writeLine("Current task", data.currentlyDoing)
+		if(data.debug) then
+			writeLine("Debug", data.debugMessage)
+		end
+		writeLine("Direction", dog.formatDirection(data.movingDirection))
+		local localProgress = 0 / 1
+				
+		if localProgress==0/0 then localProgress = 0 end
+		writeLine("Progress", math.floor(localProgress*100).."%")		
+		writeLine("Position", tostring(data.coords.x) .. " / " .. tostring(data.coords.y) .. " /" .. tostring(data.coords.z))
+		writeLine("Position Debug", tostring(data.coordsExcavateStart.x) .. " / " .. tostring(data.coordsExcavateStart.y) .. " /" .. tostring(data.coordsExcavateStart.z))
+		writeLine("Fuel Level", tostring(turtle.getFuelLevel()))
+		renderProgressBar(localProgress)
+		cycleProgressBar()
+		
+		local termw, termh = term.getSize()
+		term.setCursorPos(1, termh-1) 
+		term.write("Controls: E exit, F finish, S stand")
+		term.setCursorPos(1, termh) 
+		term.write(" LEFT west, RIGHT east ")
+		term.write(" UP north, DOWN south")
+	end
+
+	local function finishedProgressRenderer()
+		writeLine("Finished.", "")
+		term.setCursorPos(1, 4)
+	end
+
+	local function renderProgress()
+		clear()
+		if finished then
+			finishedProgressRenderer()
+		else
+			normalProgressRenderer()
+		end
+	end
+
+	local function displayProgress()
+		while data.currentlyDoing~=TASKS.FINISHED and running do
+			--Update information
+			renderProgress(false)		
+			sleep(0.1)
+		end
+		running = false
+	end
+
+	local function waitForKey()
+		while running do
+			local sEvent, param = os.pullEvent("key")
+			-- http://computercraft.info/wiki/index.php?title=Raw_key_events
+			if sEvent == "key" then
+				if param == 18 then -- E
+					exit = true
+                    running = false
+                    dumpToFile()
+				end
+			    if param == 33 then -- F
+					setStatus(TASKS.FINISHED)
+			    end
+			    if param == 31 then -- S
+					setStatus(TASKS.STANDING)
+			    end
+			    if param == 200 then -- UP
+					setStatus(TASKS.MOVING)
+					data.nextMovingDirection = dog.DIRS.NORTH
+			    end
+			    if param == 208 then -- DOWN
+					setStatus(TASKS.MOVING)
+					data.nextMovingDirection = dog.DIRS.SOUTH
+			    end
+			    if param == 203 then -- WEST
+					setStatus(TASKS.MOVING)
+					data.nextMovingDirection = dog.DIRS.WEST
+			    end
+			    if param == 205 then -- EAST
+					setStatus(TASKS.MOVING)
+					data.nextMovingDirection = dog.DIRS.EAST
+			    end
+			end
+		end
+	end
+	if finished then renderProgress() else parallel.waitForAny(function() parallel.waitForAll(displayProgress, waitForKey) end, stateMachine, periodicSave) cleanup() end
+	return exit
+end
+function showConfig() --Config
+	local currentlySelected = 1
+	local running = true
+	local exit = false
+	local configOptions = setmetatable(configOptionsTable,
+	{
+		__concat = function(t, s)
+			t[currentlySelected].value = t[currentlySelected].value .. (t[currentlySelected].varType=="number" and (tonumber(s)~=nil and s or "") or s)
+		end,
+		__sub = function(t, s)
+			t[currentlySelected].value = t[currentlySelected].value:sub(1, #t[currentlySelected].value - 1)
+		end,
+		__index = function(t, key)
+			if tonumber(key)~=nil then
+				return t[key]
+			else
+				for i = 1, #t do
+					if t[i].transferName == key then return t[i] end
+				end
+			end
+			return nil
+		end
+	}
+	)
+	
+	local function renderConfig()
+		term.clear()
+		local w, h = term.getSize()
+		for i = 1, #configOptions do
+			term.setCursorPos(1, i)
+			term.write(#configOptions[i].value>0 and configOptions[i].key or configOptions[i].keyBlank)
+			term.setCursorPos(w-1-#configOptions[i].value, i)
+			term.write(i==currentlySelected and "[" or " ")
+			term.write(configOptions[i].value)
+			term.write(i==currentlySelected and "]" or " ")
+		end
+		term.setCursorPos(1, h-1)
+		term.write((currentlySelected == (#configOptions + 1)) and "[Next]" or " Next ")
+		term.setCursorPos(w-5, h-1)
+		term.write((currentlySelected == (#configOptions + 2)) and "[Exit]" or " Exit ")
+		term.setCursorPos(w-2, currentlySelected)
+	end
+
+	local function showConfig()
+		while running do renderConfig() sleep(0.2) end
+	end
+	
+	local function writeStatusScreen() 
+		
+	end
+	
+	local function transferValues()
+		for i = 1, #configOptions do if configOptions[i].transferName ~= nil then
+			data[configOptions[i].transferName] = (configOptions[i].varType=="number" and tonumber or function(a) return a end)(configOptions[i].value)
+		end end
+		data.coords = {x = 0, y = data.height, z = 0} --We start at the dock.
+	end
+	local function handleInputForConfig()
+		while running do
+			local event, param = os.pullEvent()
+			if event == "key" then
+				if param == 200 then
+					currentlySelected = math.max(1, currentlySelected - 1)
+					renderConfig()
+				elseif param == 208 then
+					currentlySelected = math.min(#configOptions + 2, currentlySelected + 1)
+					renderConfig()
+				elseif param == 14 then
+					local t = configOptions - nil
+					renderConfig()
+				elseif param == 28 then
+					if currentlySelected == #configOptions + 2 then
+						exit = true
+						running = false
+					elseif currentlySelected == #configOptions + 1 then
+						transferValues()
+						running = false
+						term.clear()
+					end
+				end
+			elseif event == "char" then
+				local t = configOptions .. param
+				renderConfig()
+			end
+		end
+	end
+	parallel.waitForAll(handleInputForConfig, showConfig)
+	cleanup()
+	return exit
+end
+function showDialog(dialogStr, buttons, centre) --Load from old config or not
+	local currentlySelected = 1
+	local running = true
+	local result = false
+	--local dialogStr = "Persistance file from previous run found. Would you like to continue from where you left off?"
+	local lines = {}
+	local w, h = term.getSize()
+	for line in dialogStr:gmatch("[^\r\n]+") do	
+		local currentLine = ""
+		for token in line:gmatch("[^%s]+") do
+			if #(currentLine .. token) > w-3 then
+				table.insert(lines, currentLine)
+				currentLine = token
+			else
+				currentLine = (currentLine~="" and currentLine .. " " or "") .. token
+			end
+		end
+		if currentLine~="" then table.insert(lines, currentLine) end
+	end
+	local function renderDialog()
+		term.clear()		
+		for i = 1, #lines do		
+			term.setCursorPos(centre and ((w - #lines[i]) / 2 + 1) or 1, i + 1)
+			term.write(lines[i])
+		end
+		for i = 1, #buttons do
+			term.setCursorPos((w / (#buttons + 1)) * i - #buttons[i]/2, h - 1)
+			term.write((currentlySelected == i) and ("[" .. buttons[i] .. "]") or (" " .. buttons[i] .. " "))
+		end
+	end
+
+	local function showDialog()
+		while running do renderDialog() sleep(0.2) end
+	end
+
+	local function handleInputForDialog()
+		while running do
+			local event, param = os.pullEvent()
+			if event == "key" then
+				if param == 200 then
+					currentlySelected = math.max(1, currentlySelected - 1)
+					renderDialog()
+				elseif param == 208 then
+					currentlySelected = math.min(#buttons, currentlySelected + 1)
+					renderDialog()
+				elseif param == 28 then
+					running = false
+				end
+			end
+		end
+	end
+	parallel.waitForAll(handleInputForDialog, showDialog)
+	cleanup()
+	return currentlySelected
+end
+
+function showResumeWarning()
+	local running = true
+	local exit = false
+	local function displayWarning()
+		for i = 10, 0, -1 do
+			term.clear()
+			local lines = splitIntoLines(string.format(
+[[The quarry will continue to dig shafts in %i seconds.
+Press Enter to exit to shell.]], i))
+			for i = 1, #lines do
+				term.setCursorPos(1, i)
+				term.write(lines[i])
+			end
+			sleep(1)
+			if not running then return end
+		end
+		running = false
+	end
+	local function waitForKey()
+		while running do
+			local sEvent, param = os.pullEvent("key")
+			if sEvent == "key" then
+			    if param == 28 then
+				exit = true
+				running = false
+				dumpToFile()
+			    end
+			end
+		end
+	end
+	parallel.waitForAny(waitForKey, displayWarning)
+	return exit
+end
+--[[
+	Entry
+]]
+args={...}
+
+if args[1] == "resume" then
+	if fs.exists(PERSISTANCE_FILE_PATH) then
+		readFromFile()
+		--[[print("The quarry will automatically resume in 10 seconds.")
+		print("Press Enter to abort.")
+		parallel.waitForAny(function() sleep(10) running = false end,
+		function()
+			while running do
+				local sEvent, param = os.pullEvent("key")
+				if sEvent == "key" then
+				    if param == 28 then
+					exit = true
+					running = false
+				    end
+				end
+			end
+		end)]]
+		if showResumeWarning() then
+			cleanup()
+			return
+		end
+		if showProgress(false) then
+			cleanup()
+			return
+		end
+		showProgress(true)
+	end
+	cleanup()
+	return
+end
+local startupStatus = getStartupScriptStatus()
+if startupStatus ~= STARTUP_SCRIPT_INSTALL_STATUS.INSTALLED then
+	local variations =  {"not installed", "different from what this program suggests/needs"}
+	local dialogString = string.format(
+[[The startup script is %s.
+This means that the quarry will not automatically resume when it boots up (e.g. chunk loads).
+Would you like to install the recommended startup script?]], variations[startupStatus])
+	local startupDialogResult = showDialog(dialogString, {"Yes", "No"}, true)
+	if startupDialogResult == 1 then
+		installStartupScript()
+	end
+end
+local loadFromFile = false
+if fs.exists(PERSISTANCE_FILE_PATH) then
+	loadFromFile = showDialog("Persistance file from previous run found. Would you like to continue from where you left off?", {"Yes", "No"}, true) == 1
+end
+if loadFromFile then 
+	readFromFile()
+else
+	if showConfig() then
+		cleanup()
+		return
+	end
+end
+if showProgress(false) then
+	cleanup()
+	return
+end
+showProgress(true)

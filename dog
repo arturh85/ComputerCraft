@@ -1,0 +1,509 @@
+fuel_slot = nil
+
+	--[[
+	          z--
+			 N 2
+	          |
+	          |
+	x-- W 1 --+-- E 3  x++
+	          |
+	          |
+	         S 0
+			 z++
+	]]--
+DIRS = { 
+	SOUTH = 0,
+	WEST = 1,
+	NORTH = 2,
+	EAST = 3,
+}
+function formatDirection(direction) 
+	if(direction == DIRS.NORTH) then return "north (z--)" end
+	if(direction == DIRS.EAST) then return "east (x++)" end
+	if(direction == DIRS.SOUTH) then return "south (z++)" end
+	if(direction == DIRS.WEST) then return "west (x--)" end
+	return "?"
+end
+current_direction = nil
+
+function select(value)
+	return turtle.select(value)
+end
+
+function compare()
+	return turtle.compare()
+end
+
+function compareUp()
+	return turtle.compareUp()
+end
+
+function compareDown()
+	return turtle.compareDown()
+end
+
+function compareTo(value)
+	return turtle.compareTo(value)
+end
+
+function detect()
+	return turtle.detect()
+end
+
+function detectUp()
+	return turtle.detectUp()
+end
+
+function detectDown()
+	return turtle.detectDown()
+end
+
+function getItemCount(value)
+	return turtle.getItemCount(value)
+end
+
+function craft()
+	if not turtle.craft() then error("crafting failed") end
+end
+
+function suck()
+	return turtle.suck()
+end
+
+function suckDown()
+	return turtle.suckDown()
+end
+
+function dropDown()
+	return turtle.dropDown()
+end
+
+function placeDown()
+	if not turtle.placeDown() then
+		error("placeDown failed")
+	end
+end
+
+function place(place_direction)
+	if not place_direction then place_direction = "forward" end
+	if place_direction == "up" then
+		return turtle.placeUp()
+	elseif place_direction == "down" then
+		return turtle.placeDown()
+	elseif place_direction == "forward" then
+		return turtle.place()
+	else
+		error("bad argument: " .. place_direction)
+	end
+end
+
+function dig(dig_direction, action)
+	if not dig_direction then dig_direction = "forward" end
+	
+	if dig_direction == "false" then
+		dig_direction = "forward"
+		action = "false"
+	end
+
+	turtle.select(1)
+	if dig_direction == "up" then
+		retval = turtle.digUp()
+	elseif dig_direction == "down" then
+		retval = turtle.digDown()
+	elseif dig_direction == "forward" then
+		retval = turtle.dig()
+	else
+		error("bad argument: " .. dig_direction)
+	end
+	
+	if retval then return true end
+	if action == "false" then return false end
+	error("dig failed: " .. dig_direction)
+end
+
+function drop(cnt, drop_direction)
+	--if not cnt then cnt = turtle.getItemCount(turtle. end
+	if not drop_direction then drop_direction = "forward" end
+	if drop_direction == "up" then
+		return turtle.dropUp(cnt)
+	elseif drop_direction == "down" then
+		return turtle.dropDown(cnt)
+	elseif drop_direction == "forward" then
+		return turtle.drop(cnt)
+	else
+		error("bad argument: " .. drop_direction)
+	end
+end
+
+function dropAll(drop_direction)
+	if not drop_direction then drop_direction = "forward" end
+	if drop_direction == "up" then
+		return turtle.dropUp()
+	elseif drop_direction == "down" then
+		return turtle.dropDown()
+	elseif drop_direction == "forward" then
+		return turtle.drop()
+	else
+		error("bad argument: " .. drop_direction)
+	end
+end
+
+function digUp()
+	turtle.select(1)
+	while turtle.detectUp() and turtle.digUp() do
+		if afterDigFn then afterDigFn("up") end
+		os.sleep(1)
+	end
+end
+
+function digDown()
+	turtle.select(1)
+	if not turtle.detectDown() then return false end
+	if not turtle.digDown() then return false end
+	if afterDigFn then afterDigFn("down") end
+	return true
+end
+
+function turnRight(count)
+	if not count then count = 1 end
+	for i=1, count, 1 do
+		turtle.turnRight()
+		if current_direction then
+			current_direction = (current_direction + 1) % 4
+		end
+	end
+
+end
+
+function turnLeft(count)
+	if not count then count = 1 end
+	for i=1, count, 1 do
+		turtle.turnLeft()
+		if current_direction then
+			current_direction = (current_direction + 3) % 4
+		end
+	end
+end
+
+function turnNorth()
+	turnTo(DIRS.NORTH)
+end
+
+function turnEast()
+	turnTo(DIRS.EAST)
+end
+
+function turnSouth()
+	turnTo(DIRS.SOUTH)
+end
+
+function turnWest()
+	turnTo(DIRS.WEST)
+end
+
+function forward(count, action, action2)
+	return move("forward", count, action, action2)
+end
+
+function up(count, action, action2)
+	return move("up", count, action, action2)
+end
+
+function down(count, action, action2)
+	return move("down", count, action, action2)
+end
+
+function back(count, action, action2)
+	return move("back", count, action, action2)
+end
+
+-- to_direction: forward, up, down
+function move(to_direction, count, action, action2)
+	all_fn = {forward={move=turtle.forward, dig=turtle.dig, detect=turtle.detect},
+		      back={move=turtle.back},
+		      up={move=turtle.up, dig=turtle.digUp, detect=turtle.detectUp},
+			  down={move=turtle.down, dig=turtle.digDown, detect=turtle.detectDown}}
+	fn = all_fn[to_direction]
+	if not fn then error("bad direction") end
+	if not fn.move then error("wtf") end
+	
+	if to_direction == "back" and action == "dig" then error("cant dig backwards") end
+	
+	if not count then count = 1 end
+	for i=1, count, 1 do
+		if action == "dig" then
+			turtle.select(1)
+			while fn.detect() and fn.dig() do
+				if afterDigFn then afterDigFn("forward") end
+				os.sleep(1)
+			end
+		end
+		refuel()
+		if not fn.move() then
+			if action == "false" or action2 == "false" then return false end
+			error("cant move: " .. to_direction)
+		end
+	end
+	return true
+end
+
+function setFuelSlot(value)
+	fuel_slot = value
+end
+
+fuel_ender = nil
+function setFuelEnder(value)
+	fuel_ender = value
+end
+
+afterDigFn = nil
+
+function setAfterDig(fn)
+	afterDigFn = fn
+end
+
+function refuel(fuel_min)
+	if not fuel_min then fuel_min = 1 end
+
+	if turtle.getFuelLevel() > fuel_min then
+		return true
+	end
+	
+	if not fuel_slot then
+		error("no fuel slot selected")
+	end
+	
+	--[[
+	if turtle.getItemCount(fuel_slot) < 2 then
+		if not fuel_ender then error("not enough fuel") end
+		
+		turtle.select(fuel_ender)
+		if not turtle.placeUp() then error("cant place chest") end
+		turtle.select(fuel_slot)
+		turtle.suck()
+		turtle.digUp()
+			
+	end
+	]]--
+	
+	turtle.select(fuel_slot)
+	while turtle.getFuelLevel() < fuel_min and turtle.getItemCount(fuel_slot) > 1 and turtle.refuel(1) do
+		print("refuel: ".. turtle.getFuelLevel())
+	end
+	if turtle.getFuelLevel() < fuel_min then error("not enough fuel") end
+end
+
+function getDirection()
+	if current_direction then
+		return current_direction
+	end
+	
+	local up_cnt = 0
+	repeat
+		for i=1, 4, 1 do
+			if not turtle.detect() then
+				break
+			end
+			turtle.turnLeft()
+		end
+		if turtle.detect() then
+			up()
+			up_cnt = up_cnt + 1
+		end
+	until not turtle.detect()
+	
+	--x1, y1, z1 = gps.locate(1, false)
+	pos1 = getLocation()
+	forward()
+	--x2, y2, z2 = gps.locate(1, false)
+	pos2 = getLocation()
+	back()
+	down(up_cnt)
+	
+	--if not x1 then error("could not get x1") end
+	--if not x2 then error("could not get x2") end
+	
+	if pos1.x > pos2.x then
+		current_direction = DIRS.WEST
+	elseif pos1.x < pos2.x then
+		current_direction = DIRS.EAST
+	elseif pos1.z > pos2.z then
+		current_direction = DIRS.NORTH
+	elseif pos1.z < pos2.z then
+		current_direction = DIRS.SOUTH
+	else
+		error("wtf")
+	end
+	
+	return current_direction
+end
+
+function turnTo(to_direction)
+	--[[
+			 N 2
+	          |
+	          |
+		W 1 --+-- E 3
+	          |
+	          |
+	         S 0
+	]]--
+	while getDirection() ~= to_direction do
+		turnLeft()
+	end
+end
+
+function getLocation()
+	local x, y, z = gps.locate(1, false)
+	if not x or not y or not z then 
+		print("could not get position. try opening modem")
+		rednet.open("right")
+		x, y, z = gps.locate(1, false)
+	end
+	if not x or not y or not z then 
+		x, y, z = gps.locate(1, true)
+	end
+	if not x or not y or not z then error("cant get location") end
+	return vector.new(x, y, z)
+end
+
+function upForward(cnt)
+	
+	for i=1,cnt,1 do
+		local fail_cnt = 0
+		while not turtle.forward() do
+			up()
+			fail_cnt = fail_cnt + 1
+			if fail_cnt > 10 then
+				--down(10)
+				error("cant go forward, even up to 10")
+			end
+		end
+	end
+end
+
+
+
+function coordsEquals(a, b) 
+	return a.x == b.x and a.y == b.y and a.z == b.z
+end
+
+function moveToDock() 
+	data.coordsDock.x = data.coordsDock.x  + 1
+	gotoPosition(data.coordsDock, "dig")
+	data.coordsDock.x = data.coordsDock.x  - 1
+	gotoPosition(data.coordsDock, "dig")
+	
+	fox.turnWest()
+end
+
+function goto(x, y, z, action)
+	local loc = fox.getLocation()
+	local x1, y1, z1 = gps.locate(1, false)
+	
+	if x > x1 then
+		fox.turnTo(DIRS.EAST)
+		fox.forward(x - x1, action, "false")
+		
+	elseif x < x1 then
+		fox.turnTo(DIRS.WEST)
+		fox.forward(x1 - x, action, "false")
+	end
+
+	if z > z1 then
+		fox.turnTo(DIRS.SOUTH)
+		fox.forward(z - z1, action, "false")
+		
+	elseif z < z1 then
+		fox.turnTo(DIRS.NORTH)
+		fox.forward(z1 - z, action, "false")
+	end
+	
+	if y > y1 then
+		fox.up(y - y1, action, "false")
+		
+	elseif y < y1 then
+		fox.down(y1 - y, action, "false")
+	end
+end
+
+function isInventoryEmpty() 
+	for i = 1,16 do
+		if(turtle.getItemCount(i) > 0) then 
+			return false 
+		end
+	end
+	
+	return true
+end
+function isInventoryFull() 
+	for i = 1,16 do
+		if(turtle.getItemCount(i) == 0) then 
+			return false 
+		end
+	end
+	
+	return true
+end
+function unloadInventory() 
+	for i = 1,16 do
+		turtle.select(i)
+		turtle.drop(64)
+	end
+end
+
+
+
+--[[
+	Code from http://wiki.interfaceware.com/112.html
+	Allows me to serialize tables.
+]]
+function SaveTable(Table)
+   local savedTables = {} -- used to record tables that have been saved, so that we do not go into an infinite recursion
+   local outFuncs = {
+      ['string']  = function(value) return string.format("%q",value) end;
+      ['boolean'] = function(value) if (value) then return 'true' else return 'false' end end;
+      ['number']  = function(value) return string.format('%f',value) end;
+   }
+   local outFuncsMeta = {
+      __index = function(t,k) error('Invalid Type For SaveTable: '..k) end      
+   }
+   setmetatable(outFuncs,outFuncsMeta)
+   local tableOut = function(value)
+      if (savedTables[value]) then
+         error('There is a cyclical reference (table value referencing another table value) in this set.');
+      end
+      local outValue = function(value) return outFuncs[type(value)](value) end
+      local out = '{'
+      for i,v in pairs(value) do out = out..'['..outValue(i)..']='..outValue(v)..';' end
+      savedTables[value] = true; --record that it has already been saved
+      return out..'}'
+   end
+   outFuncs['table'] = tableOut;
+   return tableOut(Table);
+end
+
+function LoadTable(Input)
+   -- note that this does not enforce anything, for simplicity
+   return assert(loadstring('return '..Input))()
+end
+--[[
+	Helper methods
+]]
+function xor(a, b) return (a~=b) and (a or b) end --Fake XOR snipplet
+
+local tArgs = {...}
+cmd = tArgs[1]
+if cmd == "goto" then
+	goto(tonumber(tArgs[2]), tonumber(tArgs[3]), tonumber(tArgs[4]))
+	
+	if tArgs[5] == "N" then
+		turnNorth()
+	elseif tArgs[5] == "E" then
+		turnEast()
+	elseif tArgs[5] == "S" then
+		turnSouth()
+	elseif tArgs[5] == "W" then
+		turnWest()
+	end
+end

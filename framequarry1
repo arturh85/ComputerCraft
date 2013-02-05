@@ -1,0 +1,720 @@
+--[[
+	Frame Quarry v0.1
+]]
+
+--[[
+	OreDig version 1.3
+]]
+
+--[[
+	CONSTANTS
+]]
+BEDROCK_LEVEL = 5 --Level at which the bedrock is
+PERSISTANCE_FILE_PATH = "quarrypersist"
+FRAME_MOTOR_DELAY = 0.6
+BLOCK_BREAKER_DELAY = 0.6
+TRY_LIMIT = 200
+STARTUP_SCRIPT_STRING = [[shell.run("%s", "resume")]]
+
+DIRS = { --Directions are numbers for easy manipulation.
+	NORTH = 1,
+	EAST = 2,
+	SOUTH = 4,
+	WEST = 8
+}
+
+function formatDirection(direction) 
+	if(direction == DIRS.NORTH) then return "north (z--)" end
+	if(direction == DIRS.EAST) then return "east (x++)" end
+	if(direction == DIRS.SOUTH) then return "south (z++)" end
+	if(direction == DIRS.WEST) then return "west (x--)" end
+	return "?"
+end
+
+BITS = {
+	INPUT_MOVEMENT_TESTER = 16,
+	BLOCK_BREAKER = 32,
+	OUTPUT_RESETTER = 64
+}
+
+TASKS = { --Different task descriptions
+    READY = "ready",
+    MOVING = "moving",
+    STANDING = "standing",
+    FINISHED = "finished"
+}
+
+STARTUP_SCRIPT_INSTALL_STATUS = {
+	NOT_INSTALLED = 1,
+	DIFFERENT = 2,
+	INSTALLED = 0
+}
+BLOCK_BREAKER_DIRECTION = DIRS.EAST
+
+local monitor = peripheral.wrap("top")
+
+--[[
+	Code from http://wiki.interfaceware.com/112.html
+	Allows me to serialize tables.
+]]
+function SaveTable(Table)
+   local savedTables = {} -- used to record tables that have been saved, so that we do not go into an infinite recursion
+   local outFuncs = {
+      ['string']  = function(value) return string.format("%q",value) end;
+      ['boolean'] = function(value) if (value) then return 'true' else return 'false' end end;
+      ['number']  = function(value) return string.format('%f',value) end;
+   }
+   local outFuncsMeta = {
+      __index = function(t,k) error('Invalid Type For SaveTable: '..k) end      
+   }
+   setmetatable(outFuncs,outFuncsMeta)
+   local tableOut = function(value)
+      if (savedTables[value]) then
+         error('There is a cyclical reference (table value referencing another table value) in this set.');
+      end
+      local outValue = function(value) return outFuncs[type(value)](value) end
+      local out = '{'
+      for i,v in pairs(value) do out = out..'['..outValue(i)..']='..outValue(v)..';' end
+      savedTables[value] = true; --record that it has already been saved
+      return out..'}'
+   end
+   outFuncs['table'] = tableOut;
+   return tableOut(Table);
+end
+
+function LoadTable(Input)
+   -- note that this does not enforce anything, for simplicity
+   return assert(loadstring('return '..Input))()
+end
+
+--[[
+	Now my stuff
+]]
+
+data = { --Just a table that I have created for convenience. It will be written to a file every move. Keeps track of many different variables.
+	currentlyDoing = TASKS.READY, --What task is currently being done
+    targetx = 64, -- targetx of a shaft to mine
+    startx = 0,
+	starty = 0,
+	startz = 0,
+	dockx = 256,
+	docky = BEDROCK_LEVEL + 1,
+	dockz = 281,
+	returnstartx = 0,
+    current = 0,
+	errormessage = '',
+	movingdirection = DIRS.EAST,
+	nextmovingdirection = nil,
+	tries = 0,
+	lenx = 12, --Width of quarry TODO
+	lenz = 30, --Depth of quarry TODO 
+	height = 30, --Height of quarry TODO
+	coords = {}, --Current world coordinates
+	debug = 0
+}
+data.coords = {x = 0, y = BEDROCK_LEVEL + 1, z = 0} --We start at the dock.
+
+--[[
+	Helper methods
+]]
+function xor(a, b) return (a~=b) and (a or b) end --Fake XOR snipplet
+function cleanup()
+	term.clear()
+	term.setCursorPos(1, 1)
+end
+--[[
+	Persistance
+]]
+function dumpToFile() --Dump the state to file
+	local file = io.open(PERSISTANCE_FILE_PATH, "w")
+	file:write(SaveTable(data))
+	file:close()
+end
+
+function readFromFile() --Read the state from file
+	local file = io.open(PERSISTANCE_FILE_PATH, "r")
+	if file then
+		local tableStr = file:read("*a")
+		data = LoadTable(tableStr)	
+		file:close()
+	end
+end
+
+function periodicSave()
+	while 1 do
+		dumpToFile()
+		sleep(0.5)
+	end
+end
+--[[
+	Mining methods
+]]
+
+
+do
+	function setStatus(status)
+		if(status == nil) then
+			error("status set to null?")
+		end
+		if(status == TASKS.MOVING) then
+			resetFrameMotors()
+		end
+		data.currentlyDoing = status
+		data.errormessage = ""
+	end
+	function output(value, delay) 
+		rs.setBundledOutput("back", value)
+		if(delay > 0.0) then
+			sleep(delay)	
+		end
+	end	
+	
+	function waitForMovement() 
+		if not rs.testBundledInput("back", BITS.INPUT_MOVEMENT_TESTER) then
+			data.errormessage = "input tester faulty :-("
+		end
+		
+		data.tries = 0
+		while(data.currentlyDoing == TASKS.MOVING) do
+			if data.tries > TRY_LIMIT then
+				data.errormessage = "exceeded tries OFF :-("
+			end
+			local br = false
+			if not rs.testBundledInput("back", BITS.INPUT_MOVEMENT_TESTER) then
+				data.tries = 0
+				while(data.currentlyDoing == TASKS.MOVING) do 
+					if data.tries > TRY_LIMIT then
+						data.errormessage = "exceeded tries ON :-("
+					end
+					
+					if rs.testBundledInput("back", BITS.INPUT_MOVEMENT_TESTER) then
+						br = true
+						break
+					end
+					local timerId = os.startTimer(1)
+					local event = os.pullEvent()
+				end
+			end
+			if(br) then
+				break
+			end
+			local timerId = os.startTimer(1)
+			local event = os.pullEvent()			
+			data.tries = data.tries + 1
+			data.errormessage = "waiting for movement tester for " .. tostring(data.tries) .. " tries"
+			
+			if data.tries % 10 == 0 then
+				output(BITS.BLOCK_BREAKER,   BLOCK_BREAKER_DELAY)
+				output(0,                    BLOCK_BREAKER_DELAY)
+				output(data.movingdirection,            FRAME_MOTOR_DELAY)
+				output(0,                    0)
+			end
+		end
+		data.errormessage = "moved!"
+	end
+	
+	function resetFrameMotors() 
+		data.errormessage = "resetting ..."
+		output(0,                    FRAME_MOTOR_DELAY)
+		output(BITS.OUTPUT_RESETTER, FRAME_MOTOR_DELAY)
+		output(0,                    FRAME_MOTOR_DELAY)
+		output(BITS.OUTPUT_RESETTER, FRAME_MOTOR_DELAY)
+		output(0,                    FRAME_MOTOR_DELAY)
+		output(BITS.OUTPUT_RESETTER, FRAME_MOTOR_DELAY)
+		output(0,                    FRAME_MOTOR_DELAY)
+		data.errormessage = "done!"
+		sleep(0.5)
+		data.errormessage = ""
+	end
+    function stateMachine()
+		resetFrameMotors()
+		-- main loop
+        while(true) do
+			if(data.currentlyDoing == TASKS.READY) then
+				data.coords.x = data.startx
+				data.coords.y = data.starty
+				data.coords.z = data.startz
+                setStatus(TASKS.STANDING)
+			elseif(data.currentlyDoing == TASKS.STANDING) then
+				sleep(0.5)
+				-- do nothing
+            elseif(data.currentlyDoing == TASKS.MOVING) then
+				if(data.nextmovingdirection ~= nil) then
+					data.movingdirection = data.nextmovingdirection
+					data.nextmovingdirection = nil
+				end
+			
+				output(BITS.BLOCK_BREAKER,   BLOCK_BREAKER_DELAY)
+				output(0,                    BLOCK_BREAKER_DELAY)
+				output(data.movingdirection,            FRAME_MOTOR_DELAY)
+				output(0,                    FRAME_MOTOR_DELAY)
+				output(data.movingdirection,            0)
+				waitForMovement()
+				output(0,                    FRAME_MOTOR_DELAY)
+				
+				if(data.movingdirection == DIRS.EAST) then
+					data.coords.x = data.coords.x + 1
+				end
+				if(data.movingdirection == DIRS.WEST) then
+					data.coords.x = data.coords.x - 1
+				end
+				
+				if(
+					(data.startx > data.targetx and data.coords.x <= data.targetx) or
+				    (data.startx < data.targetx and data.coords.x >= data.targetx)
+				) then
+						setStatus(TASKS.STANDING)
+				end
+			elseif(data.currentlyDoing == TASKS.FINISHED) then
+				break
+            else 
+				print("UNKNOWN STATE: " .. data.currentlyDoing)
+			end
+        end
+				
+		-- done
+		output(0, 0.2)
+		setStatus(TASKS.FINISHED)
+		fs.delete(PERSISTANCE_FILE_PATH)
+    end
+end
+--[[
+	Check if the startup script is right
+]]
+function getStartupScriptStatus()
+	if not fs.exists("startup") then return STARTUP_SCRIPT_INSTALL_STATUS.NOT_INSTALLED end
+	local file = io.open("startup", "r")
+	if not file then return STARTUP_SCRIPT_INSTALL_STATUS.NOT_INSTALLED end
+	local str = file:read("*a")
+	file:close()
+	return str == string.format(STARTUP_SCRIPT_STRING, shell.getRunningProgram()) and STARTUP_SCRIPT_INSTALL_STATUS.INSTALLED or STARTUP_SCRIPT_INSTALL_STATUS.DIFFERENT
+end
+
+function installStartupScript()
+	fs.delete("startup")
+	local file = io.open("startup", "w")
+	file:write(string.format(STARTUP_SCRIPT_STRING, shell.getRunningProgram()))
+	file:close()
+end
+
+--[[
+	GUI
+]]
+
+function splitIntoLines(str)
+	local w, h = term.getSize()
+	local lines = {}
+	for line in str:gmatch("[^\r\n]+") do	
+		local currentLine = ""
+		for token in line:gmatch("[^%s]+") do
+			if #(currentLine .. token) > w-3 then
+				table.insert(lines, currentLine)
+				currentLine = token
+			else
+				currentLine = (currentLine~="" and currentLine .. " " or "") .. token
+			end
+		end
+		if currentLine~="" then table.insert(lines, currentLine) end
+	end
+	return lines
+end
+
+function showProgress(finished) --Progress
+	local progressBarSpinChars = {"/", "-", "\\", "|"}
+	local curChar = 0
+	local cur = 1
+	local moncur = 1
+	local w, h = term.getSize()
+	local exit = false
+	local running = true
+	local function cycleProgressBar()
+		curChar = (curChar + 1) % 4 --Cycle through the progress bar chars for an animation effect
+	end
+
+	local function clear()
+		term.clear()
+		cur = 0
+	end
+	function clearMonitor() 
+		monitor.clear()
+		moncur = 0
+	end
+
+	local function allocateLine()
+		cur = cur + 1
+	end
+	local function allocateLineMonitor()
+		moncur = moncur + 1
+	end
+
+	local function renderProgressBar(fraction)
+		allocateLine()
+		term.setCursorPos(1, cur)
+		local numOfDone = math.floor((w-3)*fraction)
+		local numOfLeft = math.ceil((w-3)*(1-fraction))
+		term.write("[")
+		if numOfDone>0 then term.write(string.rep("=", numOfDone)) end
+		term.write(fraction == 1 and "=" or progressBarSpinChars[curChar + 1])
+		if numOfLeft>0 then term.write(string.rep(" ", numOfLeft)) end
+		term.write("]")
+	end
+
+	local function writeLine(desc, value)
+		if type(value) ~= "string" then value = tostring(value) end
+		allocateLine()
+		term.setCursorPos(1, cur)
+		term.write(desc .. (value~="" and ":" or ""))
+		term.setCursorPos(w - #value + 1, cur)
+		term.write(value)
+	end
+		
+	local function writeLineMonitor(desc)
+		allocateLineMonitor()
+		monitor.setCursorPos(1, moncur)
+		monitor.write(desc)
+	end
+
+	local function normalProgressRenderer()
+		writeLine("Current task", data.currentlyDoing)
+		writeLine("Info", data.errormessage)
+		writeLine("Direction", formatDirection(data.movingdirection))
+		writeLine("Start X", data.startx)
+		writeLine("Target X ", data.targetx)		
+		writeLine("Current Position", tostring(data.coords.x) .. " / " .. tostring(data.coords.y) .. " /" .. tostring(data.coords.z))
+		local localProgress = nil
+		
+		if(data.startx > data.targetx) then
+			localProgress = (data.startx - data.coords.x ) / (data.startx - data.targetx)
+		else
+			localProgress = (data.coords.x - data.startx) / (data.targetx - data.startx)
+		end
+				
+		if localProgress==0/0 then localProgress = 0 end
+		writeLine("Progress", math.floor(localProgress*100).."%")
+		
+		
+		clearMonitor()
+		writeLineMonitor(data.currentlyDoing)
+		if(data.currentlyDoing == TASKS.MOVING) then
+			writeLineMonitor(math.floor(localProgress*100).."%")
+		else
+			writeLineMonitor("")
+		end
+		writeLineMonitor(formatDirection(data.movingdirection))
+		writeLineMonitor("X=" .. tostring(data.coords.x), 0)
+		--writeLineMonitor("Y=" .. tostring(data.coords.y), 0)
+		--writeLineMonitor("Z=" .. tostring(data.coords.z), 0)
+		if(data.currentlyDoing == TASKS.MOVING) then
+			if(data.tries < 500) then
+				writeLineMonitor("try#"..tostring(data.tries))
+			else
+				writeLineMonitor("blocked!")
+			end
+		else
+			writeLineMonitor("")
+		end
+		
+		renderProgressBar(localProgress)
+        cycleProgressBar()
+		term.setCursorPos(1, h) term.write("Controls: E exit, F finish, S stand, R return, M mine...")
+	end
+
+	local function finishedProgressRenderer()
+		writeLine("Finished.", "")
+		term.setCursorPos(1, 4)
+		clearMonitor()
+		writeLineMonitor("Finished!")
+	end
+
+	local function renderProgress()
+		clear()
+		if finished then
+			finishedProgressRenderer()
+		else
+			normalProgressRenderer()
+		end
+	end
+
+	local function displayProgress()
+		while data.currentlyDoing~=TASKS.FINISHED and running do
+			--Update information
+			renderProgress(false)		
+			sleep(0.1)
+		end
+		running = false
+	end
+
+	local function waitForKey()
+		while running do
+			local sEvent, param = os.pullEvent("key")
+			if sEvent == "key" then
+			    if param == 31 then -- S
+					setStatus(TASKS.STANDING)
+			    end
+			    if param == 50 then -- M
+					setStatus(TASKS.MOVING)
+					data.nextmovingdirection = DIRS.EAST
+			    end
+			    if param == 19 then -- R
+					setStatus(TASKS.MOVING)
+					data.nextmovingdirection = DIRS.WEST
+			    end
+			    if param == 33 then -- F
+					setStatus(TASKS.FINISHED)
+			    end
+				if param == 18 then -- E
+					output(0,0.1)
+					exit = true
+                    running = false
+                    dumpToFile()
+				end
+			end
+		end
+	end
+	if finished then renderProgress() else parallel.waitForAny(function() parallel.waitForAll(displayProgress, waitForKey) end, stateMachine, periodicSave) cleanup() end
+	return exit
+end
+function showConfig() --Config
+	local currentlySelected = 1
+	local running = true
+	local exit = false
+	local configOptions = setmetatable({
+		{key = "Target X", keyBlank = "Target X (required!)", value = "5000", varType = "number", transferName = "targetx"},
+		{key = "Start X", keyBlank = "Start X (required!)", value = tostring(data.dockx), varType = "number", transferName = "startx"},
+		{key = "Start Y", keyBlank = "Start Y (required!)", value = tostring(data.docky), varType = "number", transferName = "starty"},
+		{key = "Start Z", keyBlank = "Start Z (required!)", value = tostring(data.dockz), varType = "number", transferName = "startz"}
+	},
+	{
+		__concat = function(t, s)
+			t[currentlySelected].value = t[currentlySelected].value .. (t[currentlySelected].varType=="number" and (tonumber(s)~=nil and s or "") or s)
+		end,
+		__sub = function(t, s)
+			t[currentlySelected].value = t[currentlySelected].value:sub(1, #t[currentlySelected].value - 1)
+		end,
+		__index = function(t, key)
+			if tonumber(key)~=nil then
+				return t[key]
+			else
+				for i = 1, #t do
+					if t[i].transferName == key then return t[i] end
+				end
+			end
+			return nil
+		end
+	}
+	)
+	
+	local function renderConfig()
+		term.clear()
+		local w, h = term.getSize()
+		for i = 1, #configOptions do
+			term.setCursorPos(1, i)
+			term.write(#configOptions[i].value>0 and configOptions[i].key or configOptions[i].keyBlank)
+			term.setCursorPos(w-1-#configOptions[i].value, i)
+			term.write(i==currentlySelected and "[" or " ")
+			term.write(configOptions[i].value)
+			term.write(i==currentlySelected and "]" or " ")
+		end
+		term.setCursorPos(1, h-1)
+		term.write((currentlySelected == (#configOptions + 1)) and "[Next]" or " Next ")
+		term.setCursorPos(w-5, h-1)
+		term.write((currentlySelected == (#configOptions + 2)) and "[Exit]" or " Exit ")
+		term.setCursorPos(w-2, currentlySelected)
+	end
+
+	local function showConfig()
+		while running do renderConfig() sleep(0.2) end
+	end
+
+	local function transferValues()
+		for i = 1, #configOptions do if configOptions[i].transferName ~= nil then
+			data[configOptions[i].transferName] = (configOptions[i].varType=="number" and tonumber or function(a) return a end)(configOptions[i].value)
+		end end
+		data.coords = {x = 0, y = data.height, z = 0} --We start at the dock.
+	end
+	local function handleInputForConfig()
+		while running do
+			local event, param = os.pullEvent()
+			if event == "key" then
+				if param == 200 then
+					currentlySelected = math.max(1, currentlySelected - 1)
+					renderConfig()
+				elseif param == 208 then
+					currentlySelected = math.min(#configOptions + 2, currentlySelected + 1)
+					renderConfig()
+				elseif param == 14 then
+					local t = configOptions - nil
+					renderConfig()
+				elseif param == 28 then
+					if currentlySelected == #configOptions + 2 then
+						exit = true
+						running = false
+					elseif currentlySelected == #configOptions + 1 then
+						transferValues()
+						running = false
+						term.clear()
+					end
+				end
+			elseif event == "char" then
+				local t = configOptions .. param
+				renderConfig()
+			end
+		end
+	end
+	parallel.waitForAll(handleInputForConfig, showConfig)
+	cleanup()
+	return exit
+end
+function showDialog(dialogStr, buttons, centre) --Load from old config or not
+	local currentlySelected = 1
+	local running = true
+	local result = false
+	--local dialogStr = "Persistance file from previous run found. Would you like to continue from where you left off?"
+	local lines = {}
+	local w, h = term.getSize()
+	for line in dialogStr:gmatch("[^\r\n]+") do	
+		local currentLine = ""
+		for token in line:gmatch("[^%s]+") do
+			if #(currentLine .. token) > w-3 then
+				table.insert(lines, currentLine)
+				currentLine = token
+			else
+				currentLine = (currentLine~="" and currentLine .. " " or "") .. token
+			end
+		end
+		if currentLine~="" then table.insert(lines, currentLine) end
+	end
+	local function renderDialog()
+		term.clear()		
+		for i = 1, #lines do		
+			term.setCursorPos(centre and ((w - #lines[i]) / 2 + 1) or 1, i + 1)
+			term.write(lines[i])
+		end
+		for i = 1, #buttons do
+			term.setCursorPos((w / (#buttons + 1)) * i - #buttons[i]/2, h - 1)
+			term.write((currentlySelected == i) and ("[" .. buttons[i] .. "]") or (" " .. buttons[i] .. " "))
+		end
+	end
+
+	local function showDialog()
+		while running do renderDialog() sleep(0.2) end
+	end
+
+	local function handleInputForDialog()
+		while running do
+			local event, param = os.pullEvent()
+			if event == "key" then
+				if param == 200 then
+					currentlySelected = math.max(1, currentlySelected - 1)
+					renderDialog()
+				elseif param == 208 then
+					currentlySelected = math.min(#buttons, currentlySelected + 1)
+					renderDialog()
+				elseif param == 28 then
+					running = false
+				end
+			end
+		end
+	end
+	parallel.waitForAll(handleInputForDialog, showDialog)
+	cleanup()
+	return currentlySelected
+end
+
+function showResumeWarning()
+	local running = true
+	local exit = false
+	local function displayWarning()
+		for i = 10, 0, -1 do
+			term.clear()
+			local lines = splitIntoLines(string.format(
+[[The quarry will continue to dig shafts in %i seconds.
+Press Enter to exit to shell.]], i))
+			for i = 1, #lines do
+				term.setCursorPos(1, i)
+				term.write(lines[i])
+			end
+			sleep(1)
+			if not running then return end
+		end
+		running = false
+	end
+	local function waitForKey()
+		while running do
+			local sEvent, param = os.pullEvent("key")
+			if sEvent == "key" then
+			    if param == 28 then
+				exit = true
+				running = false
+				dumpToFile()
+			    end
+			end
+		end
+	end
+	parallel.waitForAny(waitForKey, displayWarning)
+	return exit
+end
+--[[
+	Entry
+]]
+args={...}
+
+if args[1] == "resume" then
+	if fs.exists(PERSISTANCE_FILE_PATH) then
+		readFromFile()
+		--[[print("The quarry will automatically resume in 10 seconds.")
+		print("Press Enter to abort.")
+		parallel.waitForAny(function() sleep(10) running = false end,
+		function()
+			while running do
+				local sEvent, param = os.pullEvent("key")
+				if sEvent == "key" then
+				    if param == 28 then
+					exit = true
+					running = false
+				    end
+				end
+			end
+		end)]]
+		if showResumeWarning() then
+			cleanup()
+			return
+		end
+		if showProgress(false) then
+			cleanup()
+			return
+		end
+		showProgress(true)
+	end
+	cleanup()
+	return
+end
+local startupStatus = getStartupScriptStatus()
+if startupStatus ~= STARTUP_SCRIPT_INSTALL_STATUS.INSTALLED then
+	local variations =  {"not installed", "different from what this program suggests/needs"}
+	local dialogString = string.format(
+[[The startup script is %s.
+This means that the quarry will not automatically resume when it boots up (e.g. chunk loads).
+Would you like to install the recommended startup script?]], variations[startupStatus])
+	local startupDialogResult = showDialog(dialogString, {"Yes", "No"}, true)
+	if startupDialogResult == 1 then
+		installStartupScript()
+	end
+end
+local loadFromFile = false
+if fs.exists(PERSISTANCE_FILE_PATH) then
+	loadFromFile = showDialog("Persistance file from previous run found. Would you like to continue from where you left off?", {"Yes", "No"}, true) == 1
+end
+if loadFromFile then 
+	readFromFile()
+else
+	if showConfig() then
+		cleanup()
+		return
+	end
+end
+if showProgress(false) then
+	cleanup()
+	return
+end
+showProgress(true)
