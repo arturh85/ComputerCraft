@@ -24,6 +24,9 @@ function formatDirection(direction)
 	if(direction == DIRS.WEST) then return "west (x--)" end
 	return "?"
 end
+function formatXYZ(x,y,z) 
+	return tostring(x) .. " / " .. tostring(y) .. " / " .. tostring(z)
+end
 current_direction = nil
 
 function select(value)
@@ -58,8 +61,8 @@ function detectDown()
 	return turtle.detectDown()
 end
 
-function getItemCount(value)
-	return turtle.getItemCount(value)
+function getItemCount(slot)
+	return turtle.getItemCount(slot)
 end
 
 function craft()

@@ -1,17 +1,21 @@
---rednet.open("right")
---local x,y,z = gps.locate(1,false)
---print("@ " .. tostring(x) .. "/" .. tostring(y) .. "/" .. tostring(z))
-
 --[[
-	Build Frame Quarry
+	Build anything script
 ]]
 --[[
 	CONSTANTS
 ]]
 BEDROCK_LEVEL = 5 --Level at which the bedrock is
-PERSISTANCE_FILE_PATH = "buildquarrypersist"
+PERSISTANCE_FILE_PATH = "buildpersist"
 STARTUP_SCRIPT_STRING = [[shell.run("%s", "resume")]]
 CHUNK_SIZE = 16
+MINIMUM_FUEL_LEVEL_REFUEL = 500
+MINIMUM_FUEL_LEVEL_RETURN = 5000
+
+STARTUP_SCRIPT_INSTALL_STATUS = {
+	NOT_INSTALLED = 1,
+	DIFFERENT = 2,
+	INSTALLED = 0
+}
 
 	--[[
 	          z--
@@ -28,25 +32,21 @@ TASKS = { --Different task descriptions
     READY = "ready",
     STANDING = "standing",
     RETURNING = "returning",
-    MOVING = "excavate",
-    BUILD_FRAME = "build: frame",
-    BUILD_BLOCK_BREAKERS = "build: block breakers",
+    BUILDING = "building",
     FINISHED = "finished",
     EXCAVATE = "excavate",
-	MOVE_TO_EXCAVATE_START = "move to start",
+	MOVE_TO_EXCAVATE_START = "move to excavate start",
+	MOVE_TO_BUILD_START = "move to build start",
 	MOVE_TO_DOCK = "move dock",
 	MOVE_TO_DOCK_RETURN = "move to dock return",
+	
+	BEGIN_EXCAVATE = "begin excavate",
+	BEGIN_BUILD = "begin build",
+	
 	UNLOAD_AND_CHARGE = "unlock and charge"
 }
 
-STARTUP_SCRIPT_INSTALL_STATUS = {
-	NOT_INSTALLED = 1,
-	DIFFERENT = 2,
-	INSTALLED = 0
-}
-BLOCK_BREAKER_DIRECTION = dog.DIRS.EAST
-
-data = { --Just a table that I have created for convenience. It will be written to a file every move. Keeps track of many different variables.
+data = { 
 	currentlyDoing = TASKS.READY, --What task is currently being done
     excavatex = 0,
     excavatey = 0,
@@ -54,20 +54,31 @@ data = { --Just a table that I have created for convenience. It will be written 
 	excavateDirection = dog.DIRS.EAST,
 	moveToDockReturnCoords = {x = 0, y = 0, z = 0}, --Coords we go back to after going to the dock
 	moveToDockReturnTask = nil, --Task we go back to after going to the dock
-    current = 0,
 	movingDirection = dog.DIRS.EAST,
 	nextMovingDirection = nil,
-	tries = 0,
-	height = 30, --Height of quarry TODO
 	coords = {x = 0, y = 0, z = 0}, --We get our position by GPS
 	coordsDock = {x = 239, y = 15, z = 280}, --Dock world coordinates
 	
-	coordsExcavateStart = {x = 0, y = 0, z =0}, --Dock world coordinates
-	coordsExcavateEnd = {x = 0, y = 0, z =0}, --Dock world coordinates
+	coordsExcavateStart = {x = 0, y = 0, z =0}, 
+	coordsExcavateEnd = {x = 0, y = 0, z =0},
 	
+	coordsBuildInitial = {x = 0, y = 0, z =0}, 
+	coordsBuildStart = {x = 0, y = 0, z =0}, 
+	coordsBuildEnd = {x = 0, y = 0, z =0}, 
+		
+	buildCoords = {},
+	buildDimensions = {x = 0, y = 0, z =0},
+	requiredMaterials = {},
+	requiredMaterialsLeft = {},
+	slots = {},
+	
+	coordsSlot = {},
+
 	debug = 0,
 	debugMessage = ''
 }
+
+data.coordsSlot[0] = {x = 239, y = 15, z = 276}
 
 local configOptionsTable = {
 	{key = "Excavate X-Length", keyBlank = "Excavate X-Length (required!)", value = "32", varType = "number", transferName = "excavatex"},
@@ -89,6 +100,117 @@ function gotoPosition(position, action)
 	end
 end
 
+function addBuildCoords(s,x,y,z)
+	if(string.find(x, "-")) then
+		local parts = x:gmatch("[^-]+")
+		
+		for ix = tonumber(parts()), tonumber(parts()) do
+			addBuildCoords(s, ix, y, z)
+		end
+		return
+	end
+	if(string.find(y, "-")) then
+		local parts = y:gmatch("[^-]+")
+		
+		for iy = tonumber(parts()), tonumber(parts()) do
+			addBuildCoords(s, x, iy, z)
+		end
+		return
+	end
+	if(string.find(z, "-")) then
+		local parts = z:gmatch("[^-]+")
+		
+		for iz = tonumber(parts()), tonumber(parts()) do
+			addBuildCoords(s, x, y, iz)
+		end
+		return
+	end
+	
+	local ix = tonumber(x)
+	local iy = tonumber(y)
+	local iz = tonumber(z)
+	local is = tonumber(s)
+	
+	if(data.buildCoords[ix] == nil) then
+		data.buildCoords[ix] = {}
+	end
+	if(data.buildCoords[ix][iy] == nil) then
+		data.buildCoords[ix][iy] = {}
+	end
+	if(data.buildCoords[ix][iy][iz] == nil) then
+		if(data.requiredMaterials[is] == nil) then
+			data.requiredMaterials[is] = 1
+		else
+			data.requiredMaterials[is] = data.requiredMaterials[is] + 1
+		end
+		data.buildCoords[ix][iy][iz] = is
+		
+		if(data.buildDimensions.x < ix) then 
+			data.buildDimensions.x = ix
+		end
+		if(data.buildDimensions.y < iy) then 
+			data.buildDimensions.y = iy
+		end
+		if(data.buildDimensions.z < iz) then 
+			data.buildDimensions.z = iz
+		end
+	elseif(data.buildCoords[ix][iy][iz] ~= is) then
+		error("overwriting coordinate with different material at " .. dog.formatXYZ(ix,iy,iz) .. " from " .. tostring(data.buildCoords[ix][iy][iz]) .. " to " .. s)
+	end	
+end
+
+function loadFile(path) 
+	local file = io.open(path, "r")
+	local contents = file:read("*a")
+	file:close()
+	
+	local lines = contents:gmatch("[^\r\n]+")
+	for line in lines do
+		local parts = line:gmatch("[^;]+")
+		local s = parts()
+		local x = parts()
+		local y = parts()
+		local z = parts()
+		local i = 0
+		for p in parts do
+			if(i == 0) then -- 
+				s = p
+			elseif (i == 1) then
+				x = p
+			elseif (i == 1) then
+				y = p
+			elseif (i == 1) then
+				z = p
+			else
+				print("invalid number of columns")
+			end
+			i = i + 1
+		end
+		addBuildCoords(s,x,y,z)			
+	end
+	
+	--data.requiredMaterialsLeft = {}
+	
+	
+	
+	--print("buildcoords:")
+	--print(dog.SaveTable(data.buildCoords))
+	--print("requiredMaterials:")
+	--print(dog.SaveTable(data.requiredMaterials))
+	--print("build dimensions:")
+	--print(dog.SaveTable(data.buildDimensions))
+end
+
+function getSlotAt(x,y,z) 
+	if(data.buildCoords[x] == nil) then return nil end
+	if(data.buildCoords[x][y] == nil) then return nil end
+	return data.buildCoords[x][y][z]
+end
+
+function loadInventory() 
+	
+end
+
 function stateMachine()
 	rednet.open("right")
 	-- main loop
@@ -96,9 +218,12 @@ function stateMachine()
 		updateCoords()
 		
 		if(data.currentlyDoing == TASKS.READY) then
-			data.coordsExcavateStart.x = data.coords.x - (data.coords.x % 16) + 16
-			data.coordsExcavateStart.y = data.coords.y - (data.coords.y % 16)
-			data.coordsExcavateStart.z = data.coords.z - (data.coords.z % 16)			
+			setStatus(TASKS.BEGIN_BUILD)
+			
+		elseif(data.currentlyDoing == TASKS.BEGIN_EXCAVATE) then
+			data.coordsExcavateStart.x = data.coords.x - (data.coords.x % CHUNK_SIZE) + CHUNK_SIZE * 1
+			data.coordsExcavateStart.y = data.coords.y - (data.coords.y % CHUNK_SIZE)
+			data.coordsExcavateStart.z = data.coords.z - (data.coords.z % CHUNK_SIZE)		 
 			if(data.coordsExcavateStart.y == 0) then
 				data.coordsExcavateStart.y = 8
 			end			
@@ -107,8 +232,32 @@ function stateMachine()
 			data.coordsExcavateEnd.z = data.coordsExcavateStart.z + data.excavatez		
 			setStatus(TASKS.MOVE_TO_EXCAVATE_START)
 			
+		elseif(data.currentlyDoing == TASKS.BEGIN_BUILD) then
+			loadFile("/rom/programs/arturh/objects/framequarry.obj")
+			data.coordsBuildStart.x = data.coords.x - (data.coords.x % CHUNK_SIZE) + CHUNK_SIZE * 2
+			data.coordsBuildStart.y = data.coords.y - (data.coords.y % CHUNK_SIZE)
+			data.coordsBuildStart.z = data.coords.z - (data.coords.z % CHUNK_SIZE) + CHUNK_SIZE * 2		 
+			if(data.coordsBuildStart.y == 0) then
+				data.coordsBuildStart.y = 8
+			end			
+			data.coordsBuildEnd.x = data.coordsBuildStart.x + data.buildDimensions.x
+			data.coordsBuildEnd.y = data.coordsBuildStart.y + data.buildDimensions.y
+			data.coordsBuildEnd.z = data.coordsBuildStart.z + data.buildDimensions.z	
+			
+			data.moveToDockReturnCoords = {x = data.coordsBuildStart.x, y = data.coordsBuildStart.y, z = data.coordsBuildStart.z}
+			data.moveToDockReturnTask = TASKS.BUILD
+			setStatus(TASKS.MOVE_TO_DOCK)
+			
 		elseif(data.currentlyDoing == TASKS.STANDING) then
 			-- do nothing					
+			
+		elseif(data.currentlyDoing == TASKS.MOVE_TO_BUILD_START) then
+			data.excavateDirection = nil
+			if(dog.coordsEquals(data.coords, data.coordsBuildStart)) then
+				setStatus(TASKS.BUILD)
+			else
+				gotoPosition(data.coordsBuildStart, "dig")
+			end						
 			
 		elseif(data.currentlyDoing == TASKS.MOVE_TO_EXCAVATE_START) then
 			data.excavateDirection = nil
@@ -117,6 +266,7 @@ function stateMachine()
 			else
 				gotoPosition(data.coordsExcavateStart, "dig")
 			end						
+
 			
 	--[[
 	          z--
@@ -129,12 +279,85 @@ function stateMachine()
 	         S 0
 			 z++
 	]]--
-		elseif(data.currentlyDoing == TASKS.EXCAVATE) then
-			local coordsLevelExcatateStart = {x = data.coordsExcavateStart.x, y = data.coordsExcavateStart.y, z = data.coordsExcavateStart.z }
-			local coordsLevelExcatateEnd = {x = data.coordsExcavateEnd.x, y = data.coordsExcavateEnd.y, z = data.coordsExcavateEnd.z }
+		elseif(data.currentlyDoing == TASKS.BUILD) then
+			local coordsLevelBuildStart = {x = data.coordsBuildStart.x, y = data.coordsBuildStart.y, z = data.coordsBuildStart.z }
+			local coordsLevelBuildEnd = {x = data.coordsBuildEnd.x, y = data.coordsBuildEnd.y, z = data.coordsBuildEnd.z }
 			
-			local startx = coordsLevelExcatateStart.x
-			local starty = coordsLevelExcatateStart.y
+			local startx = coordsLevelBuildStart.x
+			local starty = coordsLevelBuildStart.y
+			local startz = coordsLevelBuildStart.z
+									
+			if(data.coords.x >= data.coordsBuildStart.x and data.coords.x <= data.coordsBuildEnd.x 
+				and data.coords.y >= data.coordsBuildStart.y and data.coords.y <= data.coordsBuildEnd.y
+				and data.coords.z >= data.coordsBuildStart.z and data.coords.z <= data.coordsBuildEnd.z
+				) then
+				startx = data.coords.x
+				starty = data.coords.y
+				startz = data.coords.z
+			end			
+
+			local coordsInitial = {x = startx, y = starty, z = startz }
+						
+			gotoPosition(coordsInitial, "dig")
+			
+			local target = {x = 0, y = data.coords.y, z = 0}
+			local moveOneCoords = {x = 0, y = data.coords.y, z = 0}
+			
+			local moveToDock = false
+			
+			-- build one y level
+			for ix = startx, coordsLevelBuildEnd.x do
+				target.x = ix
+				
+				-- on all runs but the first move one "down" on the x axis before moving
+				--if(ix ~= coordsLevelBuildStart.x) then
+				--	moveOneCoords.x = data.coords.x + 1
+				--	moveOneCoords.z = data.coords.z
+				--	gotoPosition(moveOneCoords, "dig")
+				--end
+				
+				for iz = startz, coordsLevelBuildEnd.z do
+					target.z = iz
+					
+					local sx = target.x - coordsLevelBuildStart.x
+					local sy = target.y - coordsLevelBuildStart.y - 1
+					local sz = target.z - coordsLevelBuildStart.z
+					
+					local slot = getSlotAt(sx, sy, sz)
+					
+					if(dog.getItemCount(slot) == 0 or dog.getFuelLevel() < MINIMUM_FUEL_LEVEL_REFUEL or isInventoryFull()) then
+						data.moveToDockReturnCoords = { x = data.coords.x, y = data.coords.y, z = data.coords.z }
+						data.moveToDockReturnTask = TASKS.BUILD
+						setStatus(TASKS.MOVE_TO_DOCK)
+						moveToDock = true
+						break
+					end
+					
+					if(slot ~= nil) then					
+						gotoPosition(target, "dig")
+						dog.select(slot)
+						dog.placeDown()						
+					end
+				end	
+				
+				if(moveToDock) then
+					break
+				end				
+			end
+			if(moveToDock == false) then
+				-- go up one y level
+				local moveOneUpCoords = {x = coordsLevelBuildStart.x, y = data.coords.y + 1, z = data.coordsBuildStart.z}
+				if(data.coords.y + 1 > coordsLevelBuildEnd.y) then
+					setStatus(TASKS.RETURNING)			
+				end
+				gotoPosition(moveOneUpCoords, "dig")
+			end
+		elseif(data.currentlyDoing == TASKS.EXCAVATE) then
+			local coordsLevelExcavateStart = {x = data.coordsExcavateStart.x, y = data.coordsExcavateStart.y, z = data.coordsExcavateStart.z }
+			local coordsLevelExcavateEnd = {x = data.coordsExcavateEnd.x, y = data.coordsExcavateEnd.y, z = data.coordsExcavateEnd.z }
+			
+			local startx = coordsLevelExcavateStart.x
+			local starty = coordsLevelExcavateStart.y
 			
 			data.debugMessage = tostring(startx)
 			
@@ -164,19 +387,19 @@ function stateMachine()
 			local moveToDock = false
 			
 			-- excavate one y level
-			for ix = startx, coordsLevelExcatateEnd.x do
+			for ix = startx, coordsLevelExcavateEnd.x do
 				target.x = ix
 				
-				if(data.coords.z == coordsLevelExcatateStart.z) then
-					target.z = coordsLevelExcatateEnd.z
-				elseif(data.coords.z == coordsLevelExcatateEnd.z) then
-					target.z = coordsLevelExcatateStart.z
+				if(data.coords.z == coordsLevelExcavateStart.z) then
+					target.z = coordsLevelExcavateEnd.z
+				elseif(data.coords.z == coordsLevelExcavateEnd.z) then
+					target.z = coordsLevelExcavateStart.z
 				else
-					target.z = coordsLevelExcatateStart.z
+					target.z = coordsLevelExcavateStart.z
 				end
 				
 				-- on all runs but the first move one "down" on the x axis before moving
-				if(ix ~= coordsLevelExcatateStart.x) then
+				if(ix ~= coordsLevelExcavateStart.x) then
 					moveOneCoords.x = data.coords.x + 1
 					moveOneCoords.z = data.coords.z
 					gotoPosition(moveOneCoords, "dig")
@@ -184,7 +407,7 @@ function stateMachine()
 				
 				gotoPosition(target, "dig")
 				
-				if(turtle.getFuelLevel() < 500 or isInventoryFull()) then
+				if(turtle.getFuelLevel() < MINIMUM_FUEL_LEVEL_REFUEL or isInventoryFull()) then
 					data.moveToDockReturnCoords = { x = data.coords.x, y = data.coords.y, z = data.coords.z }
 					data.moveToDockReturnTask = TASKS.EXCAVATE
 					setStatus(TASKS.MOVE_TO_DOCK)
@@ -195,8 +418,8 @@ function stateMachine()
 			
 			if(moveToDock == false) then
 				-- go up one y level
-				local moveOneUpCoords = {x = coordsLevelExcatateStart.x, y = data.coords.y + 1, z = data.coordsExcavateStart.z}
-				if(data.coords.y + 1 > coordsLevelExcatateEnd.y) then
+				local moveOneUpCoords = {x = coordsLevelExcavateStart.x, y = data.coords.y + 1, z = data.coordsExcavateStart.z}
+				if(data.coords.y + 1 > coordsLevelExcavateEnd.y) then
 					setStatus(TASKS.RETURNING)			
 				end
 				gotoPosition(moveOneUpCoords, "dig")
@@ -214,8 +437,13 @@ function stateMachine()
 				moveToDock()
 			end		
 		elseif(data.currentlyDoing == TASKS.UNLOAD_AND_CHARGE) then
-			dog.unloadInventory()
-			if(turtle.getFuelLevel() > 10000) then
+			if(data.moveToDockReturnTask == TASKS.EXCAVATE) then
+				dog.unloadInventory()
+			elseif(data.moveToDockReturnTask == TASKS.BUILD) then
+				loadInventory()
+			end 
+			
+			if(turtle.getFuelLevel() > MINIMUM_FUEL_LEVEL_RETURN) then
 				setStatus(TASKS.MOVE_TO_DOCK_RETURN)
 				
 				data.coordsDock.x = data.coordsDock.x  + 1
@@ -498,15 +726,10 @@ function showConfig() --Config
 		while running do renderConfig() sleep(0.2) end
 	end
 	
-	local function writeStatusScreen() 
-		
-	end
-	
 	local function transferValues()
 		for i = 1, #configOptions do if configOptions[i].transferName ~= nil then
 			data[configOptions[i].transferName] = (configOptions[i].varType=="number" and tonumber or function(a) return a end)(configOptions[i].value)
 		end end
-		data.coords = {x = 0, y = data.height, z = 0} --We start at the dock.
 	end
 	local function handleInputForConfig()
 		while running do
